@@ -289,49 +289,6 @@ async function resolveChatId(input) {
 // ── Rutas HTTP ───────────────────────────────────────────────────
 
 /**
- * GET /qr
- * Muestra el QR de WhatsApp como página HTML escaneable desde el navegador.
- * Útil cuando el proceso corre en un VPS sin acceso directo a la terminal.
- */
-app.get('/qr', (req, res) => {
-    if (clientReady) {
-        return res.send('<html><body style="font-family:sans-serif;text-align:center;padding:40px"><h2 style="color:green">✅ WhatsApp ya está conectado</h2><p>No es necesario escanear ningún QR.</p></body></html>');
-    }
-    if (!latestQr) {
-        return res.send('<html><head><meta http-equiv="refresh" content="3"></head><body style="font-family:sans-serif;text-align:center;padding:40px"><h2>⏳ Esperando QR...</h2><p>El cliente WhatsApp aún está iniciando. Esta página se recarga automáticamente cada 3 segundos.</p></body></html>');
-    }
-    res.send(`<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="30">
-  <title>WhatsApp QR</title>
-  <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
-  <style>
-    body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f0f0f0; }
-    .card { background: white; padding: 32px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); text-align: center; }
-    h2 { color: #128C7E; margin-top: 0; }
-    p { color: #555; font-size: 14px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>📱 Escanea con WhatsApp</h2>
-    <canvas id="qr"></canvas>
-    <p>Abre WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
-    <p style="color:#aaa">Esta página se recarga automáticamente cada 30 segundos.</p>
-  </div>
-  <script>
-    QRCode.toCanvas(document.getElementById('qr'), ${JSON.stringify(latestQr)}, { width: 300, margin: 2 }, function(err) {
-      if (err) document.body.innerHTML += '<p style="color:red">Error al generar QR: ' + err + '</p>';
-    });
-  </script>
-</body>
-</html>`);
-});
-
-/**
  * GET /status
  * Verifica si el cliente está listo.
  */
