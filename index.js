@@ -141,6 +141,7 @@ const client = new Client({
             '--disable-gpu',
             '--no-first-run',
             '--no-zygote',
+            '--single-process',
             '--disable-software-rasterizer',
             '--disable-extensions',
             '--disable-background-networking',
