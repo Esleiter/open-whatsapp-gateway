@@ -158,8 +158,8 @@ const client = new Client({
     takeoverOnConflict: true,
     takeoverTimeoutMs: 10000,
     webVersionCache: {
-        type: 'remote',
-        strict: false
+        type: 'local',
+        path: path.join(__dirname, '.wwebjs_cache')
     }
 });
 
