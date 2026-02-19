@@ -9,6 +9,10 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "overrides": {
+    "minimatch": "^10.2.1",
+    "glob": "^10.5.1"
+  },
   "dependencies": {
     "express": "^5.2.1",
     "mime-types": "^3.0.2",
