@@ -167,7 +167,6 @@ client.on('qr', qr => {
     latestQr = qr;
     console.log('\n📱 Escanea este QR con WhatsApp:\n');
     qrcode.generate(qr, { small: true });
-    console.log(`\n🌐 También puedes escanearlo en: http://<TU-IP-VPS>:${PORT}/qr\n`);
 });
 
 client.on('loading_screen', (percent, message) => {
