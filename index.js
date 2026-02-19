@@ -90,10 +90,14 @@ function getChromePath() {
 
     const list = candidates[process.platform] ?? candidates.linux;
     const found = list.find(p => fs.existsSync(p));
-    if (found) return found;
+    if (found) {
+        console.log(`🌐 Navegador encontrado: ${found}`);
+        return found;
+    }
 
-    console.warn('⚠️  No se encontró ningún navegador. Instala Chrome, Edge o Chromium, o define CHROME_PATH en .env');
-    return undefined; // puppeteer usará su propio Chromium si está disponible
+    console.warn('⚠️  No se encontró Chrome/Chromium. Puppeteer usará su Chromium interno.');
+    console.warn('   → En Ubuntu/Debian instala con: apt install -y chromium-browser');
+    return undefined;
 }
 
 // Estado del cliente
@@ -106,10 +110,28 @@ const SESSION_DIR = path.join(__dirname, '.wwebjs_auth', 'session');
 });
 
 // ── WhatsApp Client ──────────────────────────────────────────────
+const CACHE_DIR = path.join(__dirname, '.wwebjs_cache');
+const chromePath = getChromePath();
+if (chromePath) {
+    console.log(`🔧 executablePath: ${chromePath}`);
+} else {
+    // Intenta detectar el Chromium interno de puppeteer
+    try {
+        const puppeteer = require('puppeteer');
+        const execPath = puppeteer.executablePath();
+        console.log(`🔧 Chromium interno de puppeteer: ${execPath}`);
+        if (!fs.existsSync(execPath)) {
+            console.error('❌ El Chromium de puppeteer no existe en disco. Ejecuta: npx puppeteer browsers install chrome');
+        }
+    } catch (_) {
+        console.warn('⚠️  puppeteer no está instalado como dependencia directa.');
+    }
+}
+
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
-        ...(getChromePath() ? { executablePath: getChromePath() } : {}),
+        ...(chromePath ? { executablePath: chromePath } : {}),
         headless: true,
         timeout: 120000,
         args: [
@@ -119,7 +141,16 @@ const client = new Client({
             '--disable-gpu',
             '--no-first-run',
             '--no-zygote',
-            '--disable-extensions'
+            '--disable-software-rasterizer',
+            '--disable-extensions',
+            '--disable-background-networking',
+            '--disable-default-apps',
+            '--disable-sync',
+            '--disable-translate',
+            '--hide-scrollbars',
+            '--metrics-recording-only',
+            '--mute-audio',
+            '--safebrowsing-disable-auto-update'
         ]
     },
     qrMaxRetries: 5,
@@ -127,8 +158,8 @@ const client = new Client({
     takeoverOnConflict: true,
     takeoverTimeoutMs: 10000,
     webVersionCache: {
-        type: 'local',                      // guarda la versión en disco, no la descarga cada vez
-        path: path.join(__dirname, '.wwebjs_cache')
+        type: 'remote',
+        strict: false
     }
 });
 
@@ -137,6 +168,24 @@ client.on('qr', qr => {
     console.log('\n📱 Escanea este QR con WhatsApp:\n');
     qrcode.generate(qr, { small: true });
     console.log(`\n🌐 También puedes escanearlo en: http://<TU-IP-VPS>:${PORT}/qr\n`);
+});
+
+client.on('loading_screen', (percent, message) => {
+    console.log(`⏳ Cargando WhatsApp Web: ${percent}% — ${message}`);
+});
+
+client.on('authenticated', () => {
+    console.log('🔐 Autenticado correctamente.');
+});
+
+client.on('auth_failure', msg => {
+    console.error('❌ Fallo de autenticación:', msg);
+    latestQr = null;
+    // Borra caché de sesión para forzar nuevo QR
+    const authDir = path.join(__dirname, '.wwebjs_auth');
+    if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
+    console.log('🗑️  Sesión borrada. Reiniciando en 5s...');
+    setTimeout(() => client.initialize().catch(err => console.error('Error al reiniciar:', err.message)), 5000);
 });
 
 client.on('ready', () => {
@@ -159,7 +208,16 @@ client.on('disconnected', reason => {
     }, 5000);
 });
 
-client.initialize();
+console.log('🔄 Iniciando cliente WhatsApp...');
+client.initialize().catch(err => {
+    console.error('💥 Error al inicializar WhatsApp:', err.message);
+    console.error(err.stack);
+    console.error('\n👉 Posibles causas en VPS:');
+    console.error('   1. Chromium no instalado → apt install -y chromium-browser');
+    console.error('   2. Dependencias faltantes → apt install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2');
+    console.error('   3. Sin memoria suficiente → revisa con: free -h');
+});
+
 client.on('message', async msg => {
     try {
         const fromRaw = msg.from;                                    // "584140000000@c.us"
