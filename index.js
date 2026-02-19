@@ -58,6 +58,44 @@ function fireWebhook(payload) {
     }
 }
 
+// Ruta del navegador: usa CHROME_PATH si está definido, si no busca el primero disponible
+function getChromePath() {
+    if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+
+    const candidates = {
+        win32: [
+            `${process.env['PROGRAMFILES'] || 'C:\\Program Files'}\\Google\\Chrome\\Application\\chrome.exe`,
+            `${process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)'}\\Google\\Chrome\\Application\\chrome.exe`,
+            `${process.env['LOCALAPPDATA'] || ''}\\Google\\Chrome\\Application\\chrome.exe`,
+            `${process.env['PROGRAMFILES'] || 'C:\\Program Files'}\\Microsoft\\Edge\\Application\\msedge.exe`,
+            `${process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)'}\\Microsoft\\Edge\\Application\\msedge.exe`,
+            `${process.env['PROGRAMFILES'] || 'C:\\Program Files'}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+        ],
+        darwin: [
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+            '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+            '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        ],
+        linux: [
+            '/usr/bin/google-chrome',
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser',
+            '/usr/bin/microsoft-edge',
+            '/usr/bin/brave-browser',
+            '/snap/bin/chromium',
+        ],
+    };
+
+    const list = candidates[process.platform] ?? candidates.linux;
+    const found = list.find(p => fs.existsSync(p));
+    if (found) return found;
+
+    console.warn('⚠️  No se encontró ningún navegador. Instala Chrome, Edge o Chromium, o define CHROME_PATH en .env');
+    return undefined; // puppeteer usará su propio Chromium si está disponible
+}
+
 // Estado del cliente
 let clientReady = false;
 const SESSION_DIR = path.join(__dirname, '.wwebjs_auth', 'session');
@@ -70,7 +108,7 @@ const SESSION_DIR = path.join(__dirname, '.wwebjs_auth', 'session');
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
-        executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        ...(getChromePath() ? { executablePath: getChromePath() } : {}),
         headless: true,
         timeout: 120000,
         args: [
