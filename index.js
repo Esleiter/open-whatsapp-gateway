@@ -128,31 +128,36 @@ if (chromePath) {
     }
 }
 
+const isWindows = process.platform === 'win32';
+const puppeteerArgs = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--no-first-run',
+    '--disable-software-rasterizer',
+    '--disable-extensions',
+    '--disable-background-networking',
+    '--disable-default-apps',
+    '--disable-sync',
+    '--disable-translate',
+    '--hide-scrollbars',
+    '--metrics-recording-only',
+    '--mute-audio',
+    '--safebrowsing-disable-auto-update'
+];
+// --no-zygote y --single-process causan crashes en Windows
+if (!isWindows) {
+    puppeteerArgs.push('--no-zygote', '--single-process');
+}
+
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
         ...(chromePath ? { executablePath: chromePath } : {}),
         headless: true,
         timeout: 120000,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-software-rasterizer',
-            '--disable-extensions',
-            '--disable-background-networking',
-            '--disable-default-apps',
-            '--disable-sync',
-            '--disable-translate',
-            '--hide-scrollbars',
-            '--metrics-recording-only',
-            '--mute-audio',
-            '--safebrowsing-disable-auto-update'
-        ]
+        args: puppeteerArgs
     },
     qrMaxRetries: 5,
     restartOnAuthFail: true,
@@ -208,15 +213,39 @@ client.on('disconnected', reason => {
     }, 5000);
 });
 
-console.log('🔄 Iniciando cliente WhatsApp...');
-client.initialize().catch(err => {
-    console.error('💥 Error al inicializar WhatsApp:', err.message);
-    console.error(err.stack);
-    console.error('\n👉 Posibles causas en VPS:');
-    console.error('   1. Chromium no instalado → apt install -y chromium-browser');
-    console.error('   2. Dependencias faltantes → apt install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2');
-    console.error('   3. Sin memoria suficiente → revisa con: free -h');
-});
+const MAX_INIT_RETRIES = 3;
+let initRetries = 0;
+
+async function initializeWithRetry() {
+    while (initRetries < MAX_INIT_RETRIES) {
+        try {
+            initRetries++;
+            console.log(`🔄 Iniciando cliente WhatsApp... (intento ${initRetries}/${MAX_INIT_RETRIES})`);
+            // Limpiar locks antes de cada intento
+            ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'DevToolsActivePort'].forEach(f => {
+                const p = path.join(SESSION_DIR, f);
+                if (fs.existsSync(p)) { fs.unlinkSync(p); console.log(`🔓 Eliminado: ${f}`); }
+            });
+            await client.initialize();
+            return; // éxito
+        } catch (err) {
+            console.error(`💥 Error al inicializar WhatsApp (intento ${initRetries}):`, err.message);
+            if (initRetries < MAX_INIT_RETRIES) {
+                const delay = initRetries * 5000;
+                console.log(`⏳ Reintentando en ${delay / 1000}s...`);
+                await new Promise(r => setTimeout(r, delay));
+            } else {
+                console.error(err.stack);
+                console.error('\n👉 Posibles causas:');
+                console.error('   1. Chrome/Chromium no funcional o incompatible');
+                console.error('   2. Sesión corrupta → borra la carpeta .wwebjs_auth y reinicia');
+                console.error('   3. Sin memoria suficiente → revisa con: free -h (Linux) o Task Manager (Windows)');
+            }
+        }
+    }
+}
+
+initializeWithRetry();
 
 client.on('message', async msg => {
     try {
