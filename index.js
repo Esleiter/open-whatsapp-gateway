@@ -404,8 +404,6 @@ app.post('/send-file', upload.single('file'), async (req, res) => {
     }
 });
 
-const puppeteer = require('puppeteer');
-
 /**
  * POST /html-to-pdf
  * Convierte HTML a PDF y devuelve el binario.
