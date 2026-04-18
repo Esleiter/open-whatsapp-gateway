@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
+const puppeteer = require('puppeteer');
 
 const app = express();
 const PORT = process.env.PORT || 2001;
@@ -400,6 +401,51 @@ app.post('/send-file', upload.single('file'), async (req, res) => {
     } finally {
         // Limpia el archivo temporal
         fs.unlink(filePath, () => {});
+    }
+});
+
+const puppeteer = require('puppeteer');
+
+/**
+ * POST /html-to-pdf
+ * Convierte HTML a PDF y devuelve el binario.
+ *
+ * Body JSON:
+ *   { "html": "<html>...</html>", "filename": "brief.pdf" }
+ */
+app.post('/html-to-pdf', express.json({ limit: '10mb' }), async (req, res) => {
+    const { html, filename = 'documento.pdf' } = req.body;
+    if (!html) return res.status(400).json({ error: 'Falta el campo html' });
+
+    let browser;
+    try {
+        browser = await puppeteer.launch({
+            ...(chromePath ? { executablePath: chromePath } : {}),
+            headless: true,
+            args: puppeteerArgs
+        });
+
+        const page = await browser.newPage();
+        await page.setContent(html, { waitUntil: 'networkidle0' });
+
+        const pdfBuffer = await page.pdf({
+            format: 'A4',
+            margin: { top: '24px', bottom: '24px', left: '24px', right: '24px' },
+            printBackground: true
+        });
+
+        res.set({
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': `attachment; filename="${filename}"`,
+            'Content-Length': pdfBuffer.length
+        });
+        res.send(pdfBuffer);
+
+    } catch (err) {
+        console.error('❌ Error generando PDF:', err.message);
+        res.status(500).json({ error: err.message });
+    } finally {
+        if (browser) await browser.close();
     }
 });
 
