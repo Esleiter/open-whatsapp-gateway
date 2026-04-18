@@ -12,16 +12,17 @@ Expone una API REST para **enviar mensajes y archivos**, y reenvía los **mensaj
 3. [Instalación](#instalación)
 4. [Configuración](#configuración)
 5. [Inicio y autenticación QR](#inicio-y-autenticación-qr)
-6. [API REST](#api-rest)
+6. [Ejecutar en segundo plano con PM2](#ejecutar-en-segundo-plano-con-pm2)
+7. [API REST](#api-rest)
    - [GET /status](#get-status)
    - [GET /webhook](#get-webhook)
    - [POST /send](#post-send)
    - [POST /send-file](#post-send-file)
-7. [Webhook de mensajes entrantes](#webhook-de-mensajes-entrantes)
-8. [Reconexión automática](#reconexión-automática)
-9. [Estructura del proyecto](#estructura-del-proyecto)
-10. [Dependencias](#dependencias)
-11. [Notas de seguridad](#notas-de-seguridad)
+8. [Webhook de mensajes entrantes](#webhook-de-mensajes-entrantes)
+9. [Reconexión automática](#reconexión-automática)
+10. [Estructura del proyecto](#estructura-del-proyecto)
+11. [Dependencias](#dependencias)
+12. [Notas de seguridad](#notas-de-seguridad)
 
 ---
 
@@ -118,6 +119,107 @@ node index.js
    ✅ WhatsApp listo. Servidor HTTP escuchando en :2001
    ```
 4. La sesión se guarda en `.wwebjs_auth/` — los **reinicios posteriores no requieren QR**.
+
+---
+
+## Ejecutar en segundo plano con PM2
+
+PM2 mantiene el proceso activo, lo reinicia automáticamente si falla y arranca con el sistema operativo.
+
+### 1. Instalar PM2
+
+```bash
+npm install -g pm2
+```
+
+### 2. Primera autenticación (escanear QR)
+
+Antes de dejar el servicio en segundo plano, es necesario autenticarse **una vez** con la terminal visible para poder escanear el código QR:
+
+```bash
+npm start
+```
+
+Una vez que veas `✅ WhatsApp listo`, detén el proceso con `Ctrl+C`. La sesión queda guardada en `.wwebjs_auth/` y los reinicios posteriores no requerirán QR.
+
+### 3. Iniciar con PM2
+
+```bash
+pm2 start ecosystem.config.js
+```
+
+### 4. Comandos útiles de PM2
+
+```bash
+# Ver estado del proceso
+pm2 status
+
+# Ver logs en tiempo real
+pm2 logs whatsapp-gateway
+
+# Ver solo los últimos 100 registros
+pm2 logs whatsapp-gateway --lines 100
+
+# Reiniciar manualmente
+pm2 restart whatsapp-gateway
+
+# Detener
+pm2 stop whatsapp-gateway
+
+# Eliminar del registro de PM2
+pm2 delete whatsapp-gateway
+```
+
+### 5. Arranque automático con el sistema
+
+Para que PM2 inicie el servicio automáticamente al arrancar el sistema operativo:
+
+```bash
+# Genera e instala el script de inicio
+pm2 startup
+
+# Guarda la lista de procesos activos
+pm2 save
+```
+
+> En Windows, `pm2 startup` puede requerir ejecutar el comando resultante como Administrador.
+
+### 6. Comportamiento de reinicio automático
+
+El archivo `ecosystem.config.js` configura PM2 con las siguientes políticas:
+
+| Parámetro | Valor | Descripción |
+|---|---|---|
+| `restart_delay` | 5 s | Espera antes de cada reinicio |
+| `max_restarts` | 20 | Máximo de reinicios antes de marcar el proceso como `errored` |
+| `min_uptime` | 30 s | Tiempo mínimo de vida para que el reinicio no cuente |
+| `exp_backoff_restart_delay` | 100 ms | Aumenta el delay entre reinicios sucesivos |
+| `max_memory_restart` | 500 MB | Reinicia si el proceso supera este uso de memoria |
+
+El proceso sale con código `1` en estos casos (lo que dispara el reinicio de PM2):
+- Se agotan todos los reintentos de inicialización de WhatsApp
+- Fallo de autenticación (sesión corrupta) — borra `.wwebjs_auth/` y reinicia limpio
+
+### 7. Resetear sesión manualmente
+
+Si WhatsApp pide volver a escanear el QR (por ejemplo, tras cerrar sesión desde el teléfono):
+
+```bash
+# Detener el proceso
+pm2 stop whatsapp-gateway
+
+# Borrar la sesión guardada
+rm -rf .wwebjs_auth
+
+# Iniciar con terminal visible para escanear el nuevo QR
+node index.js
+# (escanear QR y esperar "✅ WhatsApp listo")
+# Ctrl+C
+
+# Volver a segundo plano
+pm2 start ecosystem.config.js
+pm2 save
+```
 
 ---
 
@@ -306,8 +408,9 @@ Si WhatsApp se desconecta (cierre de sesión, pérdida de red, conflicto de sesi
 
 1. Registra la desconexión en consola.
 2. Espera **5 segundos**.
-3. Limpia los archivos de bloqueo de Chromium.
-4. Llama a `client.initialize()` para reconectarse automáticamente.
+3. Limpia los archivos de bloqueo de Chromium (`SingletonLock`, etc.).
+4. Reintenta la inicialización hasta **5 veces** con espera incremental (10 s, 20 s, 30 s…).
+5. Si se agotan todos los reintentos, el proceso termina con código `1` para que **PM2 lo reinicie automáticamente**.
 
 Si la sesión ya estaba guardada (`.wwebjs_auth/`), no se pedirá QR nuevamente.
 
@@ -317,11 +420,14 @@ Si la sesión ya estaba guardada (`.wwebjs_auth/`), no se pedirá QR nuevamente.
 
 ```
 send-whatsapp/
-├── index.js            # Entrada principal: servidor Express + cliente WhatsApp
-├── package.json        # Metadatos y dependencias
-├── uploads/            # Carpeta temporal para archivos entrantes (se autocrea)
-├── .wwebjs_auth/       # Sesión persistente de WhatsApp (se autocrea al autenticar)
-└── .wwebjs_cache/      # Caché de versión de WhatsApp Web (se autocrea)
+├── index.js             # Entrada principal: servidor Express + cliente WhatsApp
+├── ecosystem.config.js  # Configuración de PM2
+├── package.json         # Metadatos y dependencias
+├── .env                 # Variables de entorno (PORT, WEBHOOK_URL) — no incluir en git
+├── logs/                # Logs de PM2 (se autocrea)
+├── uploads/             # Carpeta temporal para archivos entrantes (se autocrea)
+├── .wwebjs_auth/        # Sesión persistente de WhatsApp (se autocrea al autenticar)
+└── .wwebjs_cache/       # Caché de versión de WhatsApp Web (se autocrea)
 ```
 
 > Las carpetas `.wwebjs_auth/` y `.wwebjs_cache/` son generadas automáticamente y **no deben incluirse en control de versiones**.

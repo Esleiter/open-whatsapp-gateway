@@ -104,10 +104,6 @@ function getChromePath() {
 let clientReady = false;
 let latestQr = null;
 const SESSION_DIR = path.join(__dirname, '.wwebjs_auth', 'session');
-['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'DevToolsActivePort'].forEach(f => {
-    const p = path.join(SESSION_DIR, f);
-    if (fs.existsSync(p)) { fs.unlinkSync(p); console.log(`🔓 Eliminado: ${f}`); }
-});
 
 // ── WhatsApp Client ──────────────────────────────────────────────
 const CACHE_DIR = path.join(__dirname, '.wwebjs_cache');
@@ -186,11 +182,11 @@ client.on('authenticated', () => {
 client.on('auth_failure', msg => {
     console.error('❌ Fallo de autenticación:', msg);
     latestQr = null;
-    // Borra caché de sesión para forzar nuevo QR
+    clientReady = false;
     const authDir = path.join(__dirname, '.wwebjs_auth');
     if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
-    console.log('🗑️  Sesión borrada. Reiniciando en 5s...');
-    setTimeout(() => client.initialize().catch(err => console.error('Error al reiniciar:', err.message)), 5000);
+    console.log('🗑️  Sesión borrada. Saliendo para que PM2 reinicie...');
+    process.exit(1);
 });
 
 client.on('ready', () => {
@@ -202,36 +198,39 @@ client.on('ready', () => {
 client.on('disconnected', reason => {
     clientReady = false;
     console.warn('⚠️  WhatsApp desconectado:', reason);
-    // Reintenta reconectar después de 5 segundos
-    setTimeout(() => {
-        console.log('🔄 Reconectando...');
-        ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'DevToolsActivePort'].forEach(f => {
-            const p = path.join(SESSION_DIR, f);
-            if (fs.existsSync(p)) fs.unlinkSync(p);
-        });
-        client.initialize().catch(err => console.error('Error al reconectar:', err.message));
-    }, 5000);
+    console.log('🔄 Reconectando con reintentos...');
+    setTimeout(() => initializeWithRetry(), 5000);
 });
 
-const MAX_INIT_RETRIES = 3;
+const MAX_INIT_RETRIES = 5;
+const MAX_INIT_DELAY_MS = 30000;
 let initRetries = 0;
+let isInitializing = false;
+
+function cleanLockFiles() {
+    ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'DevToolsActivePort'].forEach(f => {
+        const p = path.join(SESSION_DIR, f);
+        if (fs.existsSync(p)) { fs.unlinkSync(p); console.log(`🔓 Eliminado: ${f}`); }
+    });
+}
 
 async function initializeWithRetry() {
+    if (isInitializing) return;
+    isInitializing = true;
+    initRetries = 0;
+
     while (initRetries < MAX_INIT_RETRIES) {
         try {
             initRetries++;
             console.log(`🔄 Iniciando cliente WhatsApp... (intento ${initRetries}/${MAX_INIT_RETRIES})`);
-            // Limpiar locks antes de cada intento
-            ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'DevToolsActivePort'].forEach(f => {
-                const p = path.join(SESSION_DIR, f);
-                if (fs.existsSync(p)) { fs.unlinkSync(p); console.log(`🔓 Eliminado: ${f}`); }
-            });
+            cleanLockFiles();
             await client.initialize();
+            isInitializing = false;
             return; // éxito
         } catch (err) {
             console.error(`💥 Error al inicializar WhatsApp (intento ${initRetries}):`, err.message);
             if (initRetries < MAX_INIT_RETRIES) {
-                const delay = initRetries * 5000;
+                const delay = Math.min(initRetries * 10000, MAX_INIT_DELAY_MS);
                 console.log(`⏳ Reintentando en ${delay / 1000}s...`);
                 await new Promise(r => setTimeout(r, delay));
             } else {
@@ -240,6 +239,8 @@ async function initializeWithRetry() {
                 console.error('   1. Chrome/Chromium no funcional o incompatible');
                 console.error('   2. Sesión corrupta → borra la carpeta .wwebjs_auth y reinicia');
                 console.error('   3. Sin memoria suficiente → revisa con: free -h (Linux) o Task Manager (Windows)');
+                console.error('\n💀 Agotados todos los reintentos. Saliendo para que PM2 reinicie el proceso...');
+                process.exit(1);
             }
         }
     }
