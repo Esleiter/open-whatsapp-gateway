@@ -37,7 +37,9 @@ function fireWebhook(payload) {
     try {
         const body = JSON.stringify(payload);
         const url = new URL(WEBHOOK_URL);
+        const target = `${url.protocol}//${url.host}${url.pathname}${url.search}`;
         const lib = url.protocol === 'https:' ? https : http;
+        console.log(`📡 Enviando webhook a: ${target}`);
         const req = lib.request({
             hostname: url.hostname,
             port: url.port || (url.protocol === 'https:' ? 443 : 80),
@@ -48,13 +50,13 @@ function fireWebhook(payload) {
                 'Content-Length': Buffer.byteLength(body)
             }
         }, res => {
-            console.log(`🔔 Webhook enviado → ${res.statusCode}`);
+            console.log(`🔔 Webhook respuesta ${res.statusCode} desde ${target}`);
         });
-        req.on('error', err => console.error('❌ Webhook error:', err.message));
+        req.on('error', err => console.error(`❌ Webhook error a ${target}:`, err.message));
         req.write(body);
         req.end();
     } catch (err) {
-        console.error('❌ Webhook URL inválida:', err.message);
+        console.error(`❌ Webhook URL inválida (${WEBHOOK_URL}):`, err.message);
     }
 }
 
