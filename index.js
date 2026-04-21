@@ -8,6 +8,9 @@ const fs = require('fs');
 const https = require('https');
 const http = require('http');
 const puppeteer = require('puppeteer');
+const pdfParse = require('pdf-parse');
+const { createWorker } = require('tesseract.js');
+const { fromBuffer } = require('pdf2pic');
 
 const app = express();
 const PORT = process.env.PORT || 2001;
@@ -444,6 +447,92 @@ app.post('/html-to-pdf', express.json({ limit: '10mb' }), async (req, res) => {
         res.status(500).json({ error: err.message });
     } finally {
         if (browser) await browser.close();
+    }
+});
+
+/**
+ * POST /extract-pdf
+ * Extrae el texto de un PDF. Si el PDF es escaneado (sin texto),
+ * hace OCR automáticamente página por página con Tesseract.
+ *
+ * Form-data:
+ *   file : <archivo PDF>
+ *
+ * Respuesta JSON:
+ *   {
+ *     success : true,
+ *     method  : "text" | "ocr",
+ *     pages   : 3,
+ *     text    : "Contenido extraído..."
+ *   }
+ */
+app.post('/extract-pdf', upload.single('file'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Falta el archivo PDF (campo: file)' });
+
+    const filePath = path.join(UPLOAD_DIR, req.file.filename);
+
+    try {
+        const pdfParse = require('pdf-parse');
+        const fileBuffer = fs.readFileSync(filePath);
+
+        // ── Intento 1: extracción de texto nativa ────────────────
+        const parsed = await pdfParse(fileBuffer);
+        const extractedText = (parsed.text || '').trim();
+
+        if (extractedText.length > 20) {
+            // PDF digital con texto seleccionable ✅
+            return res.json({
+                success: true,
+                method: 'text',
+                pages: parsed.numpages,
+                text: extractedText
+            });
+        }
+
+        // ── Intento 2: OCR (PDF escaneado o sin texto) ───────────
+        console.log('⚠️  Sin texto nativo, aplicando OCR...');
+        const { fromBuffer } = require('pdf2pic');
+        const { createWorker } = require('tesseract.js');
+
+        // Convierte cada página del PDF a imagen PNG en memoria
+        const converter = fromBuffer(fileBuffer, {
+            density: 200,          // DPI — mayor calidad, más lento
+            format: 'png',
+            width: 1654,
+            height: 2339,
+            saveFilename: 'page',
+            savePath: UPLOAD_DIR
+        });
+
+        const totalPages = parsed.numpages || 1;
+        const worker = await createWorker('spa+eng'); // español + inglés
+        let fullText = '';
+
+        for (let i = 1; i <= totalPages; i++) {
+            const pageResult = await converter(i, { responseType: 'buffer' });
+            const { data: { text } } = await worker.recognize(pageResult.buffer);
+            fullText += `\n--- Página ${i} ---\n${text}`;
+
+            // Limpia imagen temporal
+            if (pageResult.path && fs.existsSync(pageResult.path)) {
+                fs.unlink(pageResult.path, () => {});
+            }
+        }
+
+        await worker.terminate();
+
+        return res.json({
+            success: true,
+            method: 'ocr',
+            pages: totalPages,
+            text: fullText.trim()
+        });
+
+    } catch (err) {
+        console.error('❌ Error extrayendo PDF:', err.message);
+        res.status(500).json({ error: err.message });
+    } finally {
+        fs.unlink(filePath, () => {});
     }
 });
 
