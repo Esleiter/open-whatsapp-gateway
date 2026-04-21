@@ -8,7 +8,7 @@ const fs = require('fs');
 const https = require('https');
 const http = require('http');
 const puppeteer = require('puppeteer');
-const pdfParse = require('pdf-parse');
+const pdfParse = require('pdf-parse').default || require('pdf-parse');
 const { createWorker } = require('tesseract.js');
 const { fromBuffer } = require('pdf2pic');
 
