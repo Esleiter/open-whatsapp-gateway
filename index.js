@@ -8,7 +8,7 @@ const fs = require('fs');
 const https = require('https');
 const http = require('http');
 const puppeteer = require('puppeteer');
-const { default: pdfParse } = require('pdf-parse');
+const { PDFParse } = require('pdf-parse');
 const { createWorker } = require('tesseract.js');
 const { fromBuffer } = require('pdf2pic');
 
@@ -311,16 +311,37 @@ async function resolveChatId(input) {
 
 // ── Helper interno: extrae texto de un Buffer PDF ────────────────
 async function extractTextFromBuffer(fileBuffer) {
-    // Intento 1: texto nativo
-    const parsed = await pdfParse(fileBuffer);
-    const extractedText = (parsed.text || '').trim();
+    let extractedText = '';
+    let totalPages = 0;
 
-    if (extractedText.length > 20) {
-        return { method: 'text', pages: parsed.numpages, text: extractedText };
+    // Intento 1: texto nativo con PDFParse v2
+    try {
+        const parser = new PDFParse();
+        const parsed = await parser.parse(fileBuffer);
+
+        // pdf-parse v2 puede devolver texto en parsed.text o en parsed.pages[]
+        if (parsed.text && parsed.text.trim().length > 0) {
+            extractedText = parsed.text.trim();
+        } else if (Array.isArray(parsed.pages) && parsed.pages.length > 0) {
+            extractedText = parsed.pages.map(p => p.text || '').join('\n').trim();
+        }
+
+        totalPages = parsed.numpages
+            || (Array.isArray(parsed.pages) ? parsed.pages.length : 0)
+            || 1;
+
+        console.log(`📄 PDF leído: ${totalPages} página(s), ${extractedText.length} caracteres extraídos`);
+    } catch (parseErr) {
+        console.error('⚠️  Error en PDFParse:', parseErr.message);
     }
 
-    // Intento 2: OCR
-    console.log('⚠️  Sin texto nativo, aplicando OCR...');
+    if (extractedText.length > 20) {
+        return { method: 'text', pages: totalPages, text: extractedText };
+    }
+
+    // Intento 2: OCR (PDF escaneado o sin texto)
+    console.log('⚠️  Sin texto nativo suficiente, aplicando OCR...');
+
     const converter = fromBuffer(fileBuffer, {
         density: 200,
         format: 'png',
@@ -330,21 +351,25 @@ async function extractTextFromBuffer(fileBuffer) {
         savePath: UPLOAD_DIR
     });
 
-    const totalPages = parsed.numpages || 1;
+    const pages = totalPages || 1;
     const worker = await createWorker('spa+eng');
     let fullText = '';
 
-    for (let i = 1; i <= totalPages; i++) {
-        const pageResult = await converter(i, { responseType: 'buffer' });
-        const { data: { text } } = await worker.recognize(pageResult.buffer);
-        fullText += `\n--- Página ${i} ---\n${text}`;
-        if (pageResult.path && fs.existsSync(pageResult.path)) {
-            fs.unlink(pageResult.path, () => {});
+    for (let i = 1; i <= pages; i++) {
+        try {
+            const pageResult = await converter(i, { responseType: 'buffer' });
+            const { data: { text } } = await worker.recognize(pageResult.buffer);
+            fullText += `\n--- Página ${i} ---\n${text}`;
+            if (pageResult.path && fs.existsSync(pageResult.path)) {
+                fs.unlink(pageResult.path, () => {});
+            }
+        } catch (pageErr) {
+            console.error(`⚠️  Error en OCR página ${i}:`, pageErr.message);
         }
     }
 
     await worker.terminate();
-    return { method: 'ocr', pages: totalPages, text: fullText.trim() };
+    return { method: 'ocr', pages, text: fullText.trim() };
 }
 
 // ── Rutas HTTP ───────────────────────────────────────────────────
@@ -463,7 +488,6 @@ app.post('/html-to-pdf', async (req, res) => {
 /**
  * POST /extract-pdf
  * Form-data: file (PDF binario)
- *
  * Respuesta: { success, method: "text"|"ocr", pages, text }
  */
 app.post('/extract-pdf', upload.single('file'), async (req, res) => {
@@ -486,7 +510,6 @@ app.post('/extract-pdf', upload.single('file'), async (req, res) => {
 /**
  * POST /extract-pdf-base64
  * Body JSON: { "data": "<base64>", "mimeType": "application/pdf" }
- *
  * Respuesta: { success, method: "text"|"ocr", pages, text }
  */
 app.post('/extract-pdf-base64', async (req, res) => {
