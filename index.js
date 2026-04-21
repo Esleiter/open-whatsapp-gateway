@@ -10,6 +10,7 @@ const http = require('http');
 const puppeteer = require('puppeteer');
 const { createWorker } = require('tesseract.js');
 const { fromBuffer } = require('pdf2pic');
+const pdfParse = require('pdf-parse');
 
 const app = express();
 const PORT = process.env.PORT || 2001;
@@ -313,26 +314,14 @@ async function extractTextFromBuffer(fileBuffer) {
     let extractedText = '';
     let totalPages = 0;
 
-    // Intento 1: texto nativo con pdfjs-dist (librería oficial Mozilla)
+    // Intento 1: texto nativo
     try {
-        const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
-        pdfjsLib.GlobalWorkerOptions.workerSrc = false;
-
-        const uint8Array = new Uint8Array(fileBuffer);
-        const loadingTask = pdfjsLib.getDocument({ data: uint8Array, useWorkerFetch: false, isEvalSupported: false });
-        const pdfDoc = await loadingTask.promise;
-        totalPages = pdfDoc.numPages;
-
-        for (let i = 1; i <= totalPages; i++) {
-            const page = await pdfDoc.getPage(i);
-            const content = await page.getTextContent();
-            const pageText = content.items.map(item => item.str).join(' ');
-            extractedText += pageText + '\n';
-        }
-        extractedText = extractedText.trim();
+        const parsed = await pdfParse(fileBuffer);
+        extractedText = (parsed.text || '').trim();
+        totalPages = parsed.numpages || 1;
         console.log(`📄 PDF leído: ${totalPages} página(s), ${extractedText.length} caracteres`);
-    } catch (pdfErr) {
-        console.error('⚠️  Error leyendo PDF con pdfjs-dist:', pdfErr.message);
+    } catch (parseErr) {
+        console.error('⚠️  Error leyendo PDF:', parseErr.message);
     }
 
     if (extractedText.length > 20) {
