@@ -8,6 +8,9 @@ const fs = require('fs');
 const https = require('https');
 const http = require('http');
 const puppeteer = require('puppeteer');
+const pdfParse = require('pdf-parse');
+const { createWorker } = require('tesseract.js');
+const { fromBuffer } = require('pdf2pic');
 
 const app = express();
 const PORT = process.env.PORT || 2001;
@@ -20,7 +23,6 @@ const upload = multer({
     storage: multer.diskStorage({
         destination: UPLOAD_DIR,
         filename: (req, file, cb) => {
-            // Conserva la extensión original para que MessageMedia detecte el MIME correcto
             const ext = path.extname(file.originalname);
             cb(null, `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
         }
@@ -62,7 +64,7 @@ function fireWebhook(payload) {
     }
 }
 
-// Ruta del navegador: usa CHROME_PATH si está definido, si no busca el primero disponible
+// Ruta del navegador
 function getChromePath() {
     if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
 
@@ -109,13 +111,11 @@ let clientReady = false;
 let latestQr = null;
 const SESSION_DIR = path.join(__dirname, '.wwebjs_auth', 'session');
 
-// ── WhatsApp Client ──────────────────────────────────────────────
 const CACHE_DIR = path.join(__dirname, '.wwebjs_cache');
 const chromePath = getChromePath();
 if (chromePath) {
     console.log(`🔧 executablePath: ${chromePath}`);
 } else {
-    // Intenta detectar el Chromium interno de puppeteer
     try {
         const puppeteer = require('puppeteer');
         const execPath = puppeteer.executablePath();
@@ -146,7 +146,6 @@ const puppeteerArgs = [
     '--mute-audio',
     '--safebrowsing-disable-auto-update'
 ];
-// --no-zygote y --single-process causan crashes en Windows
 if (!isWindows) {
     puppeteerArgs.push('--no-zygote', '--single-process');
 }
@@ -230,7 +229,7 @@ async function initializeWithRetry() {
             cleanLockFiles();
             await client.initialize();
             isInitializing = false;
-            return; // éxito
+            return;
         } catch (err) {
             console.error(`💥 Error al inicializar WhatsApp (intento ${initRetries}):`, err.message);
             if (initRetries < MAX_INIT_RETRIES) {
@@ -254,23 +253,22 @@ initializeWithRetry();
 
 client.on('message', async msg => {
     try {
-        const fromRaw = msg.from;                                    // "584140000000@c.us"
-        const phoneNumber = fromRaw.replace(/@.*$/, '');             // "584140000000"
+        const fromRaw = msg.from;
+        const phoneNumber = fromRaw.replace(/@.*$/, '');
 
         const payload = {
             event: 'message_received',
             timestamp: Date.now(),
             from: fromRaw,
-            phoneNumber,                                             // número limpio sin @c.us
+            phoneNumber,
             to: msg.to,
             body: msg.body,
-            type: msg.type,           // "chat", "image", "document", etc.
+            type: msg.type,
             hasMedia: msg.hasMedia,
             isGroup: fromRaw.endsWith('@g.us'),
             id: msg.id._serialized
         };
 
-        // Si tiene media, descarga y adjunta en base64
         if (msg.hasMedia) {
             try {
                 const media = await msg.downloadMedia();
@@ -278,7 +276,7 @@ client.on('message', async msg => {
                     payload.media = {
                         mimetype: media.mimetype,
                         filename: media.filename || null,
-                        data: media.data   // base64
+                        data: media.data
                     };
                 }
             } catch (mediaErr) {
@@ -293,7 +291,6 @@ client.on('message', async msg => {
     }
 });
 
-// Cierra el navegador limpiamente al detener el proceso
 async function shutdown() {
     console.log('\n🛑 Cerrando WhatsApp client...');
     try { await client.destroy(); } catch (_) {}
@@ -303,28 +300,57 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 // ── Helper ───────────────────────────────────────────────────────
-/**
- * Resuelve cualquier forma de destinatario a un chatId serializado:
- *   - Número limpio:  "584140000000"  → getNumberId() (resuelve LID automáticamente)
- *   - Con prefijo +: "+584140000000" → igual
- *   - Ya serializado: "584140000000@c.us" o "12345@lid" → se usa tal cual
- */
 async function resolveChatId(input) {
     const s = String(input).trim();
-    // Si ya tiene @ (ej. @c.us, @lid, @g.us) lo usamos directo
     if (s.includes('@')) return s;
-    // Si es un número de teléfono, preguntamos a WhatsApp
     const digits = s.replace(/\D/g, '');
     const resolved = await client.getNumberId(digits);
     if (!resolved) throw Object.assign(new Error(`Número no encontrado en WhatsApp: ${input}`), { status: 404 });
     return resolved._serialized;
 }
 
+// ── Helper interno: extrae texto de un Buffer PDF ────────────────
+async function extractTextFromBuffer(fileBuffer) {
+    // Intento 1: texto nativo
+    const parsed = await pdfParse(fileBuffer);
+    const extractedText = (parsed.text || '').trim();
+
+    if (extractedText.length > 20) {
+        return { method: 'text', pages: parsed.numpages, text: extractedText };
+    }
+
+    // Intento 2: OCR
+    console.log('⚠️  Sin texto nativo, aplicando OCR...');
+    const converter = fromBuffer(fileBuffer, {
+        density: 200,
+        format: 'png',
+        width: 1654,
+        height: 2339,
+        saveFilename: `ocr_${Date.now()}`,
+        savePath: UPLOAD_DIR
+    });
+
+    const totalPages = parsed.numpages || 1;
+    const worker = await createWorker('spa+eng');
+    let fullText = '';
+
+    for (let i = 1; i <= totalPages; i++) {
+        const pageResult = await converter(i, { responseType: 'buffer' });
+        const { data: { text } } = await worker.recognize(pageResult.buffer);
+        fullText += `\n--- Página ${i} ---\n${text}`;
+        if (pageResult.path && fs.existsSync(pageResult.path)) {
+            fs.unlink(pageResult.path, () => {});
+        }
+    }
+
+    await worker.terminate();
+    return { method: 'ocr', pages: totalPages, text: fullText.trim() };
+}
+
 // ── Rutas HTTP ───────────────────────────────────────────────────
 
 /**
  * GET /status
- * Verifica si el cliente está listo.
  */
 app.get('/status', (req, res) => {
     res.json({ ready: clientReady });
@@ -332,7 +358,6 @@ app.get('/status', (req, res) => {
 
 /**
  * GET /webhook
- * Devuelve la URL de webhook configurada actualmente.
  */
 app.get('/webhook', (req, res) => {
     res.json({ webhookUrl: WEBHOOK_URL || null });
@@ -340,10 +365,7 @@ app.get('/webhook', (req, res) => {
 
 /**
  * POST /send
- * Envía un mensaje de texto.
- *
- * Body JSON:
- *   { "number": "584140000000", "message": "Hola!" }
+ * Body JSON: { "number": "584140000000", "message": "Hola!" }
  */
 app.post('/send', async (req, res) => {
     if (!clientReady) return res.status(503).json({ error: 'WhatsApp no está listo aún.' });
@@ -363,12 +385,7 @@ app.post('/send', async (req, res) => {
 
 /**
  * POST /send-file
- * Envía un archivo adjunto (documento, imagen, audio, etc.).
- *
- * Form-data:
- *   number  : "584140000000"
- *   message : "Aquí va el archivo"  (opcional, caption)
- *   file    : <archivo>
+ * Form-data: number, message (opcional), file
  */
 app.post('/send-file', upload.single('file'), async (req, res) => {
     if (!clientReady) return res.status(503).json({ error: 'WhatsApp no está listo aún.' });
@@ -381,7 +398,6 @@ app.post('/send-file', upload.single('file'), async (req, res) => {
     try {
         const chatId = await resolveChatId(number);
 
-        // Prioridad: campo 'filename' del form > originalname del multipart > nombre del archivo guardado
         const rawName = req.body.filename || req.file.originalname || req.file.filename;
         const originalName = Buffer.from(rawName, 'latin1').toString('utf8');
         const mimeType = mime.lookup(originalName) || req.file.mimetype || 'application/octet-stream';
@@ -400,19 +416,15 @@ app.post('/send-file', upload.single('file'), async (req, res) => {
         console.error(err);
         res.status(500).json({ error: err.message });
     } finally {
-        // Limpia el archivo temporal
         fs.unlink(filePath, () => {});
     }
 });
 
 /**
  * POST /html-to-pdf
- * Convierte HTML a PDF y devuelve el binario.
- *
- * Body JSON:
- *   { "html": "<html>...</html>", "filename": "brief.pdf" }
+ * Body JSON: { "html": "<html>...</html>", "filename": "doc.pdf" }
  */
-app.post('/html-to-pdf', express.json({ limit: '10mb' }), async (req, res) => {
+app.post('/html-to-pdf', async (req, res) => {
     const { html, filename = 'documento.pdf' } = req.body;
     if (!html) return res.status(400).json({ error: 'Falta el campo html' });
 
@@ -450,19 +462,9 @@ app.post('/html-to-pdf', express.json({ limit: '10mb' }), async (req, res) => {
 
 /**
  * POST /extract-pdf
- * Extrae el texto de un PDF. Si el PDF es escaneado (sin texto),
- * hace OCR automáticamente página por página con Tesseract.
+ * Form-data: file (PDF binario)
  *
- * Form-data:
- *   file : <archivo PDF>
- *
- * Respuesta JSON:
- *   {
- *     success : true,
- *     method  : "text" | "ocr",
- *     pages   : 3,
- *     text    : "Contenido extraído..."
- *   }
+ * Respuesta: { success, method: "text"|"ocr", pages, text }
  */
 app.post('/extract-pdf', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Falta el archivo PDF (campo: file)' });
@@ -470,62 +472,9 @@ app.post('/extract-pdf', upload.single('file'), async (req, res) => {
     const filePath = path.join(UPLOAD_DIR, req.file.filename);
 
     try {
-        const pdfParse = require('pdf-parse');
         const fileBuffer = fs.readFileSync(filePath);
-
-        // ── Intento 1: extracción de texto nativa ────────────────
-        const parsed = await pdfParse(fileBuffer);
-        const extractedText = (parsed.text || '').trim();
-
-        if (extractedText.length > 20) {
-            // PDF digital con texto seleccionable ✅
-            return res.json({
-                success: true,
-                method: 'text',
-                pages: parsed.numpages,
-                text: extractedText
-            });
-        }
-
-        // ── Intento 2: OCR (PDF escaneado o sin texto) ───────────
-        console.log('⚠️  Sin texto nativo, aplicando OCR...');
-        const { fromBuffer } = require('pdf2pic');
-        const { createWorker } = require('tesseract.js');
-
-        // Convierte cada página del PDF a imagen PNG en memoria
-        const converter = fromBuffer(fileBuffer, {
-            density: 200,          // DPI — mayor calidad, más lento
-            format: 'png',
-            width: 1654,
-            height: 2339,
-            saveFilename: 'page',
-            savePath: UPLOAD_DIR
-        });
-
-        const totalPages = parsed.numpages || 1;
-        const worker = await createWorker('spa+eng'); // español + inglés
-        let fullText = '';
-
-        for (let i = 1; i <= totalPages; i++) {
-            const pageResult = await converter(i, { responseType: 'buffer' });
-            const { data: { text } } = await worker.recognize(pageResult.buffer);
-            fullText += `\n--- Página ${i} ---\n${text}`;
-
-            // Limpia imagen temporal
-            if (pageResult.path && fs.existsSync(pageResult.path)) {
-                fs.unlink(pageResult.path, () => {});
-            }
-        }
-
-        await worker.terminate();
-
-        return res.json({
-            success: true,
-            method: 'ocr',
-            pages: totalPages,
-            text: fullText.trim()
-        });
-
+        const result = await extractTextFromBuffer(fileBuffer);
+        res.json({ success: true, ...result });
     } catch (err) {
         console.error('❌ Error extrayendo PDF:', err.message);
         res.status(500).json({ error: err.message });
@@ -536,12 +485,11 @@ app.post('/extract-pdf', upload.single('file'), async (req, res) => {
 
 /**
  * POST /extract-pdf-base64
- * Igual que /extract-pdf pero recibe el PDF como base64 en JSON.
+ * Body JSON: { "data": "<base64>", "mimeType": "application/pdf" }
  *
- * Body JSON:
- *   { "data": "<base64 del PDF>", "mimeType": "application/pdf" }
+ * Respuesta: { success, method: "text"|"ocr", pages, text }
  */
-app.post('/extract-pdf-base64', express.json({ limit: '20mb' }), async (req, res) => {
+app.post('/extract-pdf-base64', async (req, res) => {
     const { data, mimeType } = req.body;
 
     if (!data) return res.status(400).json({ error: 'Falta el campo data (base64 del PDF)' });
@@ -549,69 +497,13 @@ app.post('/extract-pdf-base64', express.json({ limit: '20mb' }), async (req, res
         return res.status(400).json({ error: 'El archivo no parece ser un PDF' });
     }
 
-    let tempPath = null;
     try {
-        const pdfParse = require('pdf-parse');
         const fileBuffer = Buffer.from(data, 'base64');
-
-        // Guarda temporalmente para pdf2pic si se necesita OCR
-        tempPath = path.join(UPLOAD_DIR, `${Date.now()}.pdf`);
-        fs.writeFileSync(tempPath, fileBuffer);
-
-        // ── Intento 1: texto nativo ──────────────────────────────
-        const parsed = await pdfParse(fileBuffer);
-        const extractedText = (parsed.text || '').trim();
-
-        if (extractedText.length > 20) {
-            return res.json({
-                success: true,
-                method: 'text',
-                pages: parsed.numpages,
-                text: extractedText
-            });
-        }
-
-        // ── Intento 2: OCR ───────────────────────────────────────
-        console.log('⚠️  Sin texto nativo, aplicando OCR...');
-        const { fromBuffer } = require('pdf2pic');
-        const { createWorker } = require('tesseract.js');
-
-        const converter = fromBuffer(fileBuffer, {
-            density: 200,
-            format: 'png',
-            width: 1654,
-            height: 2339,
-            saveFilename: 'page',
-            savePath: UPLOAD_DIR
-        });
-
-        const totalPages = parsed.numpages || 1;
-        const worker = await createWorker('spa+eng');
-        let fullText = '';
-
-        for (let i = 1; i <= totalPages; i++) {
-            const pageResult = await converter(i, { responseType: 'buffer' });
-            const { data: { text } } = await worker.recognize(pageResult.buffer);
-            fullText += `\n--- Página ${i} ---\n${text}`;
-            if (pageResult.path && fs.existsSync(pageResult.path)) {
-                fs.unlink(pageResult.path, () => {});
-            }
-        }
-
-        await worker.terminate();
-
-        return res.json({
-            success: true,
-            method: 'ocr',
-            pages: totalPages,
-            text: fullText.trim()
-        });
-
+        const result = await extractTextFromBuffer(fileBuffer);
+        res.json({ success: true, ...result });
     } catch (err) {
-        console.error('❌ Error extrayendo PDF:', err.message);
+        console.error('❌ Error extrayendo PDF base64:', err.message);
         res.status(500).json({ error: err.message });
-    } finally {
-        if (tempPath && fs.existsSync(tempPath)) fs.unlink(tempPath, () => {});
     }
 });
 
