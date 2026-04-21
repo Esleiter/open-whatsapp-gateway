@@ -8,9 +8,6 @@ const fs = require('fs');
 const https = require('https');
 const http = require('http');
 const puppeteer = require('puppeteer');
-const pdfParse = require('pdf-parse');
-const { createWorker } = require('tesseract.js');
-const { fromBuffer } = require('pdf2pic');
 
 const app = express();
 const PORT = process.env.PORT || 2001;
