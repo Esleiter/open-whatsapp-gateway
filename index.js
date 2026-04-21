@@ -30,7 +30,8 @@ const upload = multer({
     })
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // URL destino del webhook (configurable por variable de entorno)
 const WEBHOOK_URL = process.env.WEBHOOK_URL || 'http://localhost:5678/webhook/my-n8n';
