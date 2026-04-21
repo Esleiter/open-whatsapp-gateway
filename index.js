@@ -536,6 +536,87 @@ app.post('/extract-pdf', upload.single('file'), async (req, res) => {
     }
 });
 
+/**
+ * POST /extract-pdf-base64
+ * Igual que /extract-pdf pero recibe el PDF como base64 en JSON.
+ *
+ * Body JSON:
+ *   { "data": "<base64 del PDF>", "mimeType": "application/pdf" }
+ */
+app.post('/extract-pdf-base64', express.json({ limit: '20mb' }), async (req, res) => {
+    const { data, mimeType } = req.body;
+
+    if (!data) return res.status(400).json({ error: 'Falta el campo data (base64 del PDF)' });
+    if (mimeType && !mimeType.includes('pdf')) {
+        return res.status(400).json({ error: 'El archivo no parece ser un PDF' });
+    }
+
+    let tempPath = null;
+    try {
+        const pdfParse = require('pdf-parse');
+        const fileBuffer = Buffer.from(data, 'base64');
+
+        // Guarda temporalmente para pdf2pic si se necesita OCR
+        tempPath = path.join(UPLOAD_DIR, `${Date.now()}.pdf`);
+        fs.writeFileSync(tempPath, fileBuffer);
+
+        // ── Intento 1: texto nativo ──────────────────────────────
+        const parsed = await pdfParse(fileBuffer);
+        const extractedText = (parsed.text || '').trim();
+
+        if (extractedText.length > 20) {
+            return res.json({
+                success: true,
+                method: 'text',
+                pages: parsed.numpages,
+                text: extractedText
+            });
+        }
+
+        // ── Intento 2: OCR ───────────────────────────────────────
+        console.log('⚠️  Sin texto nativo, aplicando OCR...');
+        const { fromBuffer } = require('pdf2pic');
+        const { createWorker } = require('tesseract.js');
+
+        const converter = fromBuffer(fileBuffer, {
+            density: 200,
+            format: 'png',
+            width: 1654,
+            height: 2339,
+            saveFilename: 'page',
+            savePath: UPLOAD_DIR
+        });
+
+        const totalPages = parsed.numpages || 1;
+        const worker = await createWorker('spa+eng');
+        let fullText = '';
+
+        for (let i = 1; i <= totalPages; i++) {
+            const pageResult = await converter(i, { responseType: 'buffer' });
+            const { data: { text } } = await worker.recognize(pageResult.buffer);
+            fullText += `\n--- Página ${i} ---\n${text}`;
+            if (pageResult.path && fs.existsSync(pageResult.path)) {
+                fs.unlink(pageResult.path, () => {});
+            }
+        }
+
+        await worker.terminate();
+
+        return res.json({
+            success: true,
+            method: 'ocr',
+            pages: totalPages,
+            text: fullText.trim()
+        });
+
+    } catch (err) {
+        console.error('❌ Error extrayendo PDF:', err.message);
+        res.status(500).json({ error: err.message });
+    } finally {
+        if (tempPath && fs.existsSync(tempPath)) fs.unlink(tempPath, () => {});
+    }
+});
+
 // ── Arranque HTTP ────────────────────────────────────────────────
 app.listen(PORT, () => {
     console.log(`🚀 Servidor HTTP en http://localhost:${PORT}`);
