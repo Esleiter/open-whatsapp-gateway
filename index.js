@@ -146,9 +146,10 @@ const puppeteerArgs = [
     '--mute-audio',
     '--safebrowsing-disable-auto-update'
 ];
-if (!isWindows) {
-    puppeteerArgs.push('--no-zygote', '--single-process');
-}
+// IMPORTANTE: NO usar --single-process ni --no-zygote en Linux.
+// Son la causa #1 del error "Attempted to use detached Frame" y de los
+// crashes del renderer de Chromium en VPS. Los args base de arriba bastan
+// y son estables. (Se elimina el bloque que los añadía.)
 
 const client = new Client({
     authStrategy: new LocalAuth(),
@@ -162,9 +163,14 @@ const client = new Client({
     restartOnAuthFail: true,
     takeoverOnConflict: true,
     takeoverTimeoutMs: 10000,
+    // Se fija (pinea) la versión de WhatsApp Web a una estable conocida.
+    // Evita que un update automático de WhatsApp rompa el frame.
+    // Puedes sobreescribir la URL con la variable de entorno WA_WEB_VERSION_URL.
+    // Versiones disponibles: https://github.com/wppconnect-team/wa-version
     webVersionCache: {
-        type: 'local',
-        path: path.join(__dirname, '.wwebjs_cache')
+        type: 'remote',
+        remotePath: process.env.WA_WEB_VERSION_URL ||
+            'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1023223821-alpha.html'
     }
 });
 
@@ -309,6 +315,29 @@ async function resolveChatId(input) {
     return resolved._serialized;
 }
 
+// ── Helper: envío con reintento ante "detached Frame" ────────────
+// Si el frame de Chromium se cae a mitad del envío (recarga de WhatsApp Web,
+// crash del renderer, etc.) reintenta: marca el cliente como no-listo,
+// reinicializa y vuelve a intentar el envío.
+async function safeSendMessage(chatId, content, options = {}, retries = 2) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            return await client.sendMessage(chatId, content, options);
+        } catch (err) {
+            const msg = err && err.message ? err.message : String(err);
+            const recoverable = /detached Frame|Session closed|Target closed|Protocol error|Execution context was destroyed/i.test(msg);
+            if (recoverable && attempt < retries) {
+                console.warn(`⚠️  Envío falló por frame caído (intento ${attempt + 1}/${retries + 1}): ${msg}`);
+                clientReady = false;
+                try { await initializeWithRetry(); } catch (_) {}
+                await new Promise(r => setTimeout(r, 3000));
+                continue;
+            }
+            throw err;
+        }
+    }
+}
+
 // ── Helper interno: extrae texto de un Buffer PDF ────────────────
 async function extractTextFromBuffer(fileBuffer) {
     let extractedText = '';
@@ -388,7 +417,7 @@ app.post('/send', async (req, res) => {
 
     try {
         const chatId = await resolveChatId(number);
-        const response = await client.sendMessage(chatId, message);
+        const response = await safeSendMessage(chatId, message);
         res.json({ success: true, id: response.id._serialized });
     } catch (err) {
         console.error(err);
@@ -420,7 +449,7 @@ app.post('/send-file', upload.single('file'), async (req, res) => {
         console.log(`📎 Enviando: ${originalName} | MIME: ${mimeType}`);
 
         const isImage = /^image\/(jpeg|png|gif|webp|bmp)$/i.test(mimeType);
-        const response = await client.sendMessage(chatId, media, {
+        const response = await safeSendMessage(chatId, media, {
             caption: message || '',
             sendMediaAsDocument: !isImage,
         });
