@@ -149,7 +149,7 @@ const puppeteerArgs = [
 // IMPORTANTE: NO usar --single-process ni --no-zygote en Linux.
 // Son la causa #1 del error "Attempted to use detached Frame" y de los
 // crashes del renderer de Chromium en VPS. Los args base de arriba bastan
-// y son estables. (Se elimina el bloque que los añadía.)
+// y son estables.
 
 const client = new Client({
     authStrategy: new LocalAuth(),
@@ -257,6 +257,25 @@ async function initializeWithRetry() {
 
 initializeWithRetry();
 
+// ── Helper: descarga media con reintentos ────────────────────────
+// downloadMedia() falla con frecuencia en notas de voz (ptt) y media
+// recién llegada que WhatsApp aún no terminó de sincronizar. Se
+// reintenta con espera entre intentos y se valida que exista .data
+// (el base64) antes de darla por buena.
+async function downloadMediaWithRetry(msg, retries = 3, delayMs = 1500) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const media = await msg.downloadMedia();
+            if (media && media.data) return media;
+            console.warn(`⚠️  Media vacía o sin data (intento ${attempt}/${retries}, tipo: ${msg.type})`);
+        } catch (err) {
+            console.warn(`⚠️  Error descargando media (intento ${attempt}/${retries}, tipo: ${msg.type}):`, err.message);
+        }
+        if (attempt < retries) await new Promise(r => setTimeout(r, delayMs));
+    }
+    return null;
+}
+
 client.on('message', async msg => {
     try {
         const fromRaw = msg.from;
@@ -276,21 +295,22 @@ client.on('message', async msg => {
         };
 
         if (msg.hasMedia) {
-            try {
-                const media = await msg.downloadMedia();
-                if (media) {
-                    payload.media = {
-                        mimetype: media.mimetype,
-                        filename: media.filename || null,
-                        data: media.data
-                    };
-                }
-            } catch (mediaErr) {
-                console.warn('⚠️  No se pudo descargar media:', mediaErr.message);
+            const media = await downloadMediaWithRetry(msg);
+            if (media) {
+                payload.media = {
+                    mimetype: media.mimetype,
+                    filename: media.filename || null,
+                    data: media.data // base64 garantizado
+                };
+                // Duración de la nota de voz (segundos), útil para logs/decisiones en n8n
+                if (msg.duration) payload.media.duration = msg.duration;
+            } else {
+                payload.mediaDownloadFailed = true;
+                console.error(`❌ No se pudo descargar media de ${payload.from} (tipo: ${msg.type}) tras varios intentos`);
             }
         }
 
-        console.log(`📨 Mensaje de ${payload.from}: ${payload.body || '[media]'}`);
+        console.log(`📨 Mensaje de ${payload.from} [${payload.type}]: ${payload.body || (payload.media ? '[media OK]' : '[media FALLÓ]')}`);
         fireWebhook(payload);
     } catch (err) {
         console.error('❌ Error procesando mensaje entrante:', err.message);
